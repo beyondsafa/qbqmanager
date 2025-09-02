@@ -142,10 +142,3 @@ The Python script handles port configuration and `config.json` just like on Wind
 ## License
 
 [MIT License](LICENSE)
-
-```
-
-This is ready to go as a single `README.md` for your repo, fully formatted in Markdown.  
-
-Do you want me to **also add a section for the multi-user Windows Fast User Switching script** into this same Markdown, so it’s fully documented?
-```
