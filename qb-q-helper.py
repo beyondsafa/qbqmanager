@@ -1,168 +1,155 @@
-import requests
-import time
-import os
 import json
+import time
+import requests
 from datetime import datetime
 
+# ===============================
+# qBittorrent Queue Helper (Console Version)
+# ===============================
+
 CONFIG_FILE = "config.json"
-WARMUP_DURATION = 120
-LOOP_INTERVAL = 600
-MAX_LOG_HISTORY = 5
+LOOP_INTERVAL = 10 * 60  # seconds
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return {}
+# -------------------------------
+# Load or ask for port
+# -------------------------------
+try:
+    with open(CONFIG_FILE, "r") as f:
+        config = json.load(f)
+except FileNotFoundError:
+    config = {}
 
-def save_config(config):
+if "port" not in config:
+    port = input("Enter qBittorrent port: ")
+    config["port"] = port
     with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+        json.dump(config, f)
+else:
+    port = config["port"]
 
-def get_port():
-    config = load_config()
-    if "port" in config:
-        return config["port"]
-    else:
-        port = input("Enter qBittorrent WebUI port (e.g., 8088): ").strip()
-        config["port"] = int(port)
-        save_config(config)
-        return config["port"]
+print(f"Using qBittorrent port: {port}")
+BASE_URL = f"http://localhost:{port}/api/v2"
 
-def get_torrents(session, base_url):
-    r = session.get(f"{base_url}/torrents/info")
-    r.raise_for_status()
-    return r.json()
+# -------------------------------
+# Helper functions
+# -------------------------------
+def timestamp():
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-def get_app_prefs(session, base_url):
-    r = session.get(f"{base_url}/app/preferences")
-    r.raise_for_status()
-    return r.json()
-
-def pause_torrents(session, base_url, hashes):
-    if hashes:
-        session.post(f"{base_url}/torrents/pause", data={"hashes": "|".join(hashes)})
-
-def resume_torrents(session, base_url, hashes):
-    if hashes:
-        session.post(f"{base_url}/torrents/resume", data={"hashes": "|".join(hashes)})
-
-def clear_console():
-    os.system("cls" if os.name == "nt" else "clear")
-
-def is_paused_like(state):
-    return state in ("pausedUP", "pausedDL", "queuedDL", "queuedUP")
-
-def print_red(msg):
-    print(f"\033[91m{msg}\033[0m")
-
-def main():
-    port = get_port()
-    base_url = f"http://127.0.0.1:{port}/api/v2"
-    session = requests.Session()
-    log_history = []
-
-    def log(message):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_history.append(f"[{timestamp}] {message}")
-        if len(log_history) > MAX_LOG_HISTORY:
-            log_history.pop(0)
-        clear_console()
-        print("\n".join(log_history))
-
-    # --- Initial warm-up ---
+def api_get(endpoint):
     try:
-        torrents = get_torrents(session, base_url)
-    except Exception as e:
-        print_red(f"ERROR: Could not connect to qBittorrent API ({e})")
-        for remaining in range(180, 0, -1):
-            time.sleep(1)
-            if remaining % 30 == 0 or remaining <= 10:
-                print_red(f"Exiting in {remaining} seconds...")
-        exit(1)
+        r = requests.get(f"{BASE_URL}{endpoint}")
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        print(f"[{timestamp()}] API GET Error: {e}")
+        return None
 
-    paused_hashes = [t["hash"] for t in torrents if is_paused_like(t["state"]) and t["progress"] < 1.0]
-    if paused_hashes:
-        resume_torrents(session, base_url, paused_hashes)
-        log(f"Warm-up initiated: resumed {len(paused_hashes)} torrents for ETA/availability update.")
-        time.sleep(WARMUP_DURATION)
-        pause_torrents(session, base_url, paused_hashes)
-        log("Warm-up complete: torrents paused again.")
+def api_post(endpoint, data):
+    try:
+        r = requests.post(f"{BASE_URL}{endpoint}", data=data)
+        r.raise_for_status()
+        return r.json() if r.content else None
+    except requests.exceptions.RequestException as e:
+        print(f"[{timestamp()}] API POST Error: {e}")
+        return None
 
-    # --- Main loop ---
-    while True:
-        log("Starting new queue management cycle...")
+def get_torrents():
+    return api_get("/torrents/info") or []
 
-        try:
-            prefs = get_app_prefs(session, base_url)
-            torrents = get_torrents(session, base_url)
-        except Exception as e:
-            print_red(f"ERROR: Lost connection to qBittorrent API ({e})")
-            for remaining in range(180, 0, -1):
-                time.sleep(1)
-                if remaining % 30 == 0 or remaining <= 10:
-                    print_red(f"Exiting in {remaining} seconds...")
-            exit(1)
+def get_app_preferences():
+    prefs = api_get("/app/preferences")
+    return prefs or {}
 
-        max_active_downloads = prefs.get("max_active_downloads", 3)
-        max_ratio = prefs.get("max_ratio", -1)
+# -------------------------------
+# Warm-up: start all non-completed torrents briefly
+# -------------------------------
+def warmup_torrents(torrents):
+    for t in torrents:
+        if t['state'] != 'completed':
+            api_post("/torrents/resume", {'hashes': t['hash']})
+    print(f"[{timestamp()}] Warmup initiated for non-completed torrents.")
+    time.sleep(10)  # short warmup
 
-        # Only process if there are torrents to download
-        downloading = [t for t in torrents if t["progress"] < 1.0]
-        if downloading:
-            # Stop torrents that meet ratio conditions
-            stop_hashes = []
-            for t in torrents:
-                if t["progress"] >= 1.0:
-                    if max_ratio != -1 and t["ratio"] >= max_ratio:
-                        stop_hashes.append(t["hash"])
-            pause_torrents(session, base_url, stop_hashes)
-            if stop_hashes:
-                log(f"Stopped {len(stop_hashes)} torrents (completed and ratio above limit).")
+# -------------------------------
+# Scoring and queue management
+# -------------------------------
+def manage_queue(torrents, prefs):
+    resumed, paused = [], []
 
-            # Warm-up for active queue scoring
-            paused_hashes = [t["hash"] for t in torrents if is_paused_like(t["state"]) and t["progress"] < 1.0]
-            resume_torrents(session, base_url, paused_hashes)
-            if paused_hashes:
-                log(f"Warm-up initiated: resumed {len(paused_hashes)} torrents for ETA/availability update.")
-                time.sleep(WARMUP_DURATION)
-                pause_torrents(session, base_url, paused_hashes)
-                log("Warm-up complete: torrents paused again.")
+    max_active = prefs.get('max_active_downloads', 3)
+    # Respect ratio/upload pausing
+    ratio_limit_enabled = prefs.get('max_ratio_enabled', False)
+    upload_limit_enabled = prefs.get('max_seeding_time_enabled', False)
 
-            torrents = get_torrents(session, base_url)
+    # Score: availability / (ETA+1) / (size+1)
+    scored = []
+    for t in torrents:
+        availability = t.get('availability', 0)
+        eta = t.get('eta', 0) or 999999
+        size = t.get('size', 0)
+        score = availability / (eta + 1) / (size + 1)
+        scored.append((score, t))
 
-            # Score torrents
-            scores = []
-            for t in torrents:
-                if t["progress"] >= 1.0:
-                    continue
-                availability = t.get("availability", 0) or 0.1
-                eta = t.get("eta", 10**9)
-                size = t.get("size", 1)
-                score = (availability / (eta + 1)) / size
-                scores.append((score, t))
+    # Sort descending
+    scored.sort(reverse=True, key=lambda x: x[0])
 
-            scores.sort(key=lambda x: x[0], reverse=True)
-            top_hashes = [t["hash"] for _, t in scores[:max_active_downloads]]
-            other_hashes = [t["hash"] for _, t in scores[max_active_downloads:]]
+    active_count = 0
+    for score, t in scored:
+        hash_ = t['hash']
+        name = t['name']
+        state = t['state']
 
-            resume_torrents(session, base_url, top_hashes)
-            pause_torrents(session, base_url, other_hashes)
+        # Stop torrents if completed and ratio >= 1
+        if state == 'completed' and t.get('ratio', 0) >= 1.0:
+            api_post("/torrents/pause", {'hashes': hash_})
+            paused.append(name)
+            continue
 
-            if top_hashes or other_hashes:
-                log(f"Queue updated: {len(top_hashes)} torrents resumed, {len(other_hashes)} paused.")
+        # Manage active downloads
+        if state != 'completed':
+            if active_count < max_active:
+                if state != 'downloading':
+                    api_post("/torrents/resume", {'hashes': hash_})
+                    resumed.append(name)
+                active_count += 1
             else:
-                log("No changes made this cycle.")
-        else:
-            log("No torrents to download. Waiting for torrents to be added...")
+                if state == 'downloading':
+                    api_post("/torrents/pause", {'hashes': hash_})
+                    paused.append(name)
 
-        # Countdown to next cycle
-        for remaining in range(LOOP_INTERVAL, 0, -1):
-            time.sleep(1)
-            if remaining % 60 == 0 or remaining <= 10:
-                clear_console()
-                print("\n".join(log_history))
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Next cycle in {remaining} seconds...")
+    return resumed, paused
 
-if __name__ == "__main__":
-    main()
+# -------------------------------
+# Main loop
+# -------------------------------
+iteration = 0
+while True:
+    iteration += 1
+    ts = timestamp()
+    print("\n" + "="*60)
+    print(f"[{ts}] Loop {iteration} starting...")
+
+    torrents = get_torrents()
+    if not torrents:
+        print(f"[{timestamp()}] No torrents found or API unreachable.")
+        time.sleep(LOOP_INTERVAL)
+        continue
+
+    prefs = get_app_preferences()
+    warmup_torrents(torrents)
+    resumed, paused = manage_queue(torrents, prefs)
+
+    if resumed or paused:
+        print(f"[{timestamp()}] Torrents resumed: {', '.join(resumed) if resumed else 'None'}")
+        print(f"[{timestamp()}] Torrents paused: {', '.join(paused) if paused else 'None'}")
+    else:
+        print(f"[{timestamp()}] Queue state checked: no changes necessary.")
+
+    # Countdown timer until next loop
+    print(f"[{timestamp()}] Next loop in {LOOP_INTERVAL//60} minutes.")
+    for remaining in range(LOOP_INTERVAL, 0, -1):
+        mins, secs = divmod(remaining, 60)
+        print(f"\rNext loop in {mins:02d}:{secs:02d}", end="")
+        time.sleep(1)
+    print()  # newline before next loop
