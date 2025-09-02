@@ -1,11 +1,13 @@
+# ===============================================
 # PowerShell bootstrapper for qb-q-helper.py
-# Ensures Scoop, Python, and dependencies are installed, then runs the helper.
+# Ensures Scoop, Python, and dependencies are installed, then runs the helper
+# ===============================================
 
-# Set script directory
+# --- Set script directory and Python helper path ---
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $HelperScript = Join-Path $ScriptDir "qb-q-helper.py"
 
-# Function: Check if command exists
+# --- Function to check if command exists ---
 function Test-Command {
     param([string]$Command)
     $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
@@ -44,5 +46,8 @@ foreach ($module in $RequiredModules) {
 }
 
 # 4. Run the Python helper
-Write-Host "Launching qb-q-helper.py..."
+Write-Host "`nLaunching qb-q-helper.py..."
 & python $HelperScript
+
+Write-Host "`nPython helper finished (or running loop). Press Enter to exit..."
+Read-Host
